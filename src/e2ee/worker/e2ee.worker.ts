@@ -50,22 +50,28 @@ let rtpMap: Map<number, VideoCodec> = new Map();
 
 workerLogger.setDefaultLevel('info');
 
-async function requestVideoKeyFrame(transformer: any, trackId: string): Promise<boolean> {
+async function generateVideoKeyFrame(transformer: any, trackId: string): Promise<boolean> {
   if (!transformer) return false;
 
-  if (typeof transformer.generateKeyFrame === 'function') {
-    await transformer.generateKeyFrame();
-    return true;
+  if (typeof transformer.generateKeyFrame !== 'function') {
+    workerLogger.debug('generateKeyFrame API not available on transformer', { trackId });
+    return false;
   }
 
-  if (typeof transformer.sendKeyFrameRequest === 'function') {
-    await transformer.sendKeyFrameRequest();
-    return true;
+  await transformer.generateKeyFrame();
+  return true;
+}
+
+async function sendVideoKeyFrameRequest(transformer: any, trackId: string): Promise<boolean> {
+  if (!transformer) return false;
+
+  if (typeof transformer.sendKeyFrameRequest !== 'function') {
+    workerLogger.debug('sendKeyFrameRequest API not available on transformer', { trackId });
+    return false;
   }
 
-  // If neither API exists, there's nothing we can do in this worker.
-  workerLogger.debug('keyframe request API not available on transformer', { trackId });
-  return false;
+  await transformer.sendKeyFrameRequest();
+  return true;
 }
 
 function stopKeyFrameLoop(trackId: string) {
@@ -76,7 +82,7 @@ function stopKeyFrameLoop(trackId: string) {
   }
 }
 
-function startKeyFrameLoop(trackId: string, transformer: any) {
+function startKeyFrameLoop(trackId: string, transformer: any, requestFn: () => Promise<boolean>) {
   stopKeyFrameLoop(trackId);
 
   let inFlight = false;
@@ -86,7 +92,7 @@ function startKeyFrameLoop(trackId: string, transformer: any) {
     if (inFlight) return;
     inFlight = true;
     try {
-      const didRequest = await requestVideoKeyFrame(transformer, trackId);
+      const didRequest = await requestFn();
       if (!didRequest) {
         consecutiveFailures += 1;
         if (consecutiveFailures === 1 || consecutiveFailures % 12 === 0) {
@@ -429,10 +435,19 @@ if (self.RTCTransformEvent) {
     workerLogger.debug('transform', { codec });
     cryptor.setupTransform(kind, transformer.readable, transformer.writable, trackId, false, codec);
 
-    // Force regular video keyframes for publish (encode) transforms. This requires
-    // the ScriptTransform API, and is intentionally best-effort.
-    if (kind === 'encode' && trackKind === 'video') {
-      startKeyFrameLoop(trackId, transformer);
+    // Force regular keyframes for video transforms. This requires the ScriptTransform API, and is
+    // intentionally best-effort.
+    //
+    // - Sender pipeline: request the local encoder to generate keyframes (generateKeyFrame).
+    // - Receiver pipeline: request the remote sender to send keyframes (sendKeyFrameRequest).
+    if (trackKind === 'video') {
+      if (kind === 'encode') {
+        startKeyFrameLoop(trackId, transformer, () => generateVideoKeyFrame(transformer, trackId));
+      } else if (kind === 'decode') {
+        startKeyFrameLoop(trackId, transformer, () =>
+          sendVideoKeyFrameRequest(transformer, trackId),
+        );
+      }
     }
   };
 }
