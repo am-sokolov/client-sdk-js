@@ -52,7 +52,8 @@
     "ci:publish": "pnpm build:clean && pnpm compat && changeset publish",
     "downlevel-dts": "downlevel-dts ./dist/src ./dist/ts4.2 --to=4.2",
     "compat": "eslint --config ./eslint.config.dist.mjs --no-inline-config  ./dist/livekit-client.esm.mjs",
-    "size-limit": "size-limit"
+    "size-limit": "size-limit",
+    "prepare": "npm run build:clean"
   },
   "dependencies": {
     "@livekit/mutex": "1.1.1",
