@@ -36,8 +36,8 @@
   "author": "LiveKit <hello@livekit.io>",
   "license": "Apache-2.0",
   "scripts": {
-    "build": "rollup --config --bundleConfigAsCjs && rollup --config rollup.config.worker.js --bundleConfigAsCjs && pnpm downlevel-dts",
-    "build:clean": "rimraf dist && pnpm build",
+    "build": "rollup --config --bundleConfigAsCjs && rollup --config rollup.config.worker.js --bundleConfigAsCjs && downlevel-dts ./dist/src ./dist/ts4.2 --to=4.2",
+    "build:clean": "rimraf dist && npm run build",
     "build:watch": "rollup --watch --config --bundleConfigAsCjs",
     "build:worker:watch": "rollup --watch --config rollup.config.worker.js --bundleConfigAsCjs",
     "build-docs": "typedoc && mkdir -p docs/assets/github && cp .github/*.png docs/assets/github/ && find docs -name '*.html' -type f -exec sed -i.bak 's|=\"/.github/|=\"assets/github/|g' {} + && find docs -name '*.bak' -delete",
