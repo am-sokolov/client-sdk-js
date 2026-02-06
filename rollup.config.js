@@ -5,7 +5,8 @@ import json from '@rollup/plugin-json';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
 import terser from '@rollup/plugin-terser';
 import typescript from 'rollup-plugin-typescript2';
-import packageJson from './package.json';
+
+const outBase = 'livekit-client';
 
 export function kebabCaseToPascalCase(string = '') {
   return string.replace(/(^\w|-\w)/g, (replaceString) =>
@@ -36,18 +37,18 @@ export default {
   input: 'src/index.ts',
   output: [
     {
-      file: `dist/${packageJson.name}.esm.mjs`,
+      file: `dist/${outBase}.esm.mjs`,
       format: 'es',
       strict: true,
       sourcemap: true,
       compact: true,
     },
     {
-      file: `dist/${packageJson.name}.umd.js`,
+      file: `dist/${outBase}.umd.js`,
       format: 'umd',
       strict: true,
       sourcemap: true,
-      name: kebabCaseToPascalCase(packageJson.name),
+      name: kebabCaseToPascalCase(outBase),
       plugins: [terser()],
     },
   ],
