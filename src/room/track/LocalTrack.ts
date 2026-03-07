@@ -116,6 +116,28 @@ export default abstract class LocalTrack<
         height,
       };
     }
+
+    // Some platforms (notably React Native screen share capture) do not report
+    // width/height via getSettings(). Fall back to constraints when available.
+    try {
+      const cWidth =
+        this._constraints.width !== undefined
+          ? unwrapConstraint(this._constraints.width)
+          : undefined;
+      const cHeight =
+        this._constraints.height !== undefined
+          ? unwrapConstraint(this._constraints.height)
+          : undefined;
+
+      if (typeof cWidth === 'number' && typeof cHeight === 'number' && cWidth > 0 && cHeight > 0) {
+        return {
+          width: cWidth,
+          height: cHeight,
+        };
+      }
+    } catch {
+      // ignore
+    }
     return undefined;
   }
 

@@ -536,6 +536,83 @@ export default class PCTransport extends EventEmitter {
         msg = e;
       }
 
+      // iOS WebRTC can fail to apply local offers that contain an `inactive` video m-section
+      // with leftover `msid`/`ssrc` lines (e.g. after unpublishing screen share).
+      // When that happens, strip send-side fields for the failing mid and retry once.
+      if (
+        !remote &&
+        sd.type === 'offer' &&
+        typeof sd.sdp === 'string' &&
+        msg.includes(
+          "Failed to set local video description recv parameters for m-section with mid='",
+        )
+      ) {
+        const midMatch = msg.match(/mid='([^']+)'/);
+        const failedMid = midMatch ? midMatch[1] : null;
+        const originalSdp = sd.sdp;
+
+        try {
+          const sdpParsed = parse(originalSdp);
+          let didChange = false;
+
+          sdpParsed.media.forEach((media) => {
+            if (media.type !== 'video') {
+              return;
+            }
+
+            if (failedMid) {
+              if (typeof media.mid !== 'string' && typeof media.mid !== 'number') {
+                return;
+              }
+              if (getMidString(media.mid) !== failedMid) {
+                return;
+              }
+            }
+
+            if (media.direction !== 'inactive') {
+              return;
+            }
+
+            const mutableMedia = media as MediaDescription & {
+              ssrcs?: unknown[];
+              ssrcGroups?: unknown[];
+              rids?: unknown[];
+              simulcast?: unknown;
+              msid?: string;
+            };
+
+            if (mutableMedia.ssrcs && mutableMedia.ssrcs.length > 0) {
+              mutableMedia.ssrcs = [];
+              didChange = true;
+            }
+            if (mutableMedia.ssrcGroups && mutableMedia.ssrcGroups.length > 0) {
+              mutableMedia.ssrcGroups = [];
+              didChange = true;
+            }
+            if (mutableMedia.msid) {
+              delete mutableMedia.msid;
+              didChange = true;
+            }
+            if (mutableMedia.rids && mutableMedia.rids.length > 0) {
+              mutableMedia.rids = [];
+              didChange = true;
+            }
+            if (mutableMedia.simulcast) {
+              delete mutableMedia.simulcast;
+              didChange = true;
+            }
+          });
+
+          if (didChange) {
+            sd.sdp = write(sdpParsed);
+            await this.pc.setLocalDescription(sd);
+            return;
+          }
+        } catch {
+          sd.sdp = originalSdp;
+        }
+      }
+
       const fields: any = {
         error: msg,
         sdp: sd.sdp,
