@@ -17,10 +17,7 @@ function createStreams() {
   };
 }
 
-async function loadManager(options: {
-  scriptTransformSupported: boolean;
-  chromiumBased: boolean;
-}) {
+async function loadManager(options: { scriptTransformSupported: boolean; chromiumBased: boolean }) {
   vi.resetModules();
 
   vi.doMock('./utils', async () => {
@@ -137,5 +134,64 @@ describe('E2EEManager sender setup', () => {
     });
     expect((sender as any).generateKeyFrame).not.toHaveBeenCalled();
     expect((sender as any).sendKeyFrameRequest).not.toHaveBeenCalled();
+  });
+
+  it('removes local sender transforms when a local track is unpublished', async () => {
+    const { E2EEManager, BaseKeyProvider } = await loadManager({
+      scriptTransformSupported: false,
+      chromiumBased: true,
+    });
+
+    const worker = createWorker();
+    const manager = new E2EEManager(
+      {
+        keyProvider: new BaseKeyProvider({ sharedKey: true }),
+        worker: worker as Worker,
+      },
+      false,
+    );
+
+    const localParticipant = {
+      identity: 'alice',
+      on: vi.fn().mockReturnThis(),
+    };
+    const room = {
+      localParticipant,
+      on: vi.fn().mockReturnThis(),
+      remoteParticipants: new Map(),
+    };
+
+    (manager as any).setupEventListeners(room, new BaseKeyProvider({ sharedKey: true }));
+
+    const localTrackPublishedHandler = localParticipant.on.mock.calls.find(
+      ([event]: [string]) => event === 'localTrackPublished',
+    )?.[1];
+    const localTrackUnpublishedHandler = localParticipant.on.mock.calls.find(
+      ([event]: [string]) => event === 'localTrackUnpublished',
+    )?.[1];
+
+    expect(localTrackPublishedHandler).toBeTypeOf('function');
+    expect(localTrackUnpublishedHandler).toBeTypeOf('function');
+
+    localTrackPublishedHandler({
+      trackSid: 'TR_pub',
+      track: {
+        mediaStreamID: 'track-1',
+        kind: 'audio',
+      },
+    });
+
+    localTrackUnpublishedHandler({
+      trackSid: 'TR_pub',
+      track: undefined,
+    });
+
+    expect(worker.postMessage).toHaveBeenCalledWith({
+      kind: 'removeTransform',
+      data: {
+        participantIdentity: 'alice',
+        trackId: 'track-1',
+      },
+    });
   });
 });

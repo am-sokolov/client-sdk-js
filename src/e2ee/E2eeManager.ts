@@ -76,6 +76,8 @@ export class E2EEManager
 
   private dataChannelEncryptionEnabled: boolean;
 
+  private localTrackIdsBySid: Map<string, string> = new Map();
+
   constructor(options: E2EEManagerOptions, dcEncryptionEnabled: boolean) {
     super();
     this.keyProvider = options.keyProvider;
@@ -288,6 +290,11 @@ export class E2EEManager
     });
 
     room.localParticipant.on(ParticipantEvent.LocalTrackPublished, (publication) => {
+      const trackId = publication.track?.mediaStreamID;
+      if (trackId) {
+        this.localTrackIdsBySid.set(publication.trackSid, trackId);
+      }
+
       // Safari doesn't support retrieving payload information on RTCEncodedVideoFrame, so we need to update the codec manually once we have the trackInfo from the server
       if (!isVideoTrack(publication.track) || !isSafariBased()) {
         return;
@@ -302,6 +309,25 @@ export class E2EEManager
       };
 
       this.worker.postMessage(msg);
+    });
+
+    room.localParticipant.on(ParticipantEvent.LocalTrackUnpublished, (publication) => {
+      const trackId =
+        publication.track?.mediaStreamID ?? this.localTrackIdsBySid.get(publication.trackSid);
+      this.localTrackIdsBySid.delete(publication.trackSid);
+
+      if (!trackId) {
+        return;
+      }
+
+      const msg: RemoveTransformMessage = {
+        kind: 'removeTransform',
+        data: {
+          participantIdentity: room.localParticipant.identity,
+          trackId,
+        },
+      };
+      this.worker?.postMessage(msg);
     });
 
     keyProvider

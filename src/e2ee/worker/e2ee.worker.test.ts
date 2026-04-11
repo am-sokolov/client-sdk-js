@@ -42,10 +42,12 @@ class FakeFrameCryptor {
 }
 
 class FakeParticipantKeyHandler {
-  constructor(_participantIdentity: string, _options: unknown) {}
   on() {}
+
   setKey = vi.fn();
+
   ratchetKey = vi.fn();
+
   resetKeyStatus = vi.fn();
 }
 

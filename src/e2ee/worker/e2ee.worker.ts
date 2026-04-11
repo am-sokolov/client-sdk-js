@@ -79,6 +79,15 @@ function startKeyFrameLoop(trackId: string, requestFn: () => Promise<boolean>) {
   let inFlight = false;
   let consecutiveFailures = 0;
 
+  const runTick = () => {
+    tick().catch((error) => {
+      workerLogger.warn('unexpected keyframe loop failure', {
+        trackId,
+        error,
+      });
+    });
+  };
+
   const tick = async () => {
     if (inFlight) return;
     inFlight = true;
@@ -115,9 +124,9 @@ function startKeyFrameLoop(trackId: string, requestFn: () => Promise<boolean>) {
     }
   };
 
-  void tick();
+  runTick();
   const intervalId = setInterval(() => {
-    void tick();
+    runTick();
   }, FORCE_KEYFRAME_INTERVAL_MS) as unknown as number;
   keyFrameIntervals.set(trackId, intervalId);
 }
