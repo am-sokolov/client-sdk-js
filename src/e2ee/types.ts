@@ -213,5 +213,6 @@ export type ScriptTransformOptions = {
   kind: 'decode' | 'encode';
   participantIdentity: string;
   trackId: string;
+  trackKind: 'audio' | 'video' | 'unknown';
   codec?: VideoCodec;
 };

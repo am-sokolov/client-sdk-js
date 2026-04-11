@@ -27,6 +27,10 @@ let messageQueue = new AsyncQueue();
 
 let isEncryptionEnabled: boolean = false;
 
+const FORCE_KEYFRAME_INTERVAL_MS = 5000;
+
+const keyFrameIntervals: Map<string, number> = new Map();
+
 let useSharedKey: boolean = false;
 
 let sifTrailer: Uint8Array | undefined;
@@ -36,6 +40,87 @@ let keyProviderOptions: KeyProviderOptions = KEY_PROVIDER_DEFAULTS;
 let rtpMap: Map<number, VideoCodec> = new Map();
 
 workerLogger.setDefaultLevel('info');
+
+async function generateVideoKeyFrame(transformer: any, trackId: string): Promise<boolean> {
+  if (!transformer) return false;
+
+  if (typeof transformer.generateKeyFrame !== 'function') {
+    workerLogger.debug('generateKeyFrame API not available on transformer', { trackId });
+    return false;
+  }
+
+  await transformer.generateKeyFrame();
+  return true;
+}
+
+async function sendVideoKeyFrameRequest(transformer: any, trackId: string): Promise<boolean> {
+  if (!transformer) return false;
+
+  if (typeof transformer.sendKeyFrameRequest !== 'function') {
+    workerLogger.debug('sendKeyFrameRequest API not available on transformer', { trackId });
+    return false;
+  }
+
+  await transformer.sendKeyFrameRequest();
+  return true;
+}
+
+function stopKeyFrameLoop(trackId: string) {
+  const intervalId = keyFrameIntervals.get(trackId);
+  if (intervalId !== undefined) {
+    clearInterval(intervalId);
+    keyFrameIntervals.delete(trackId);
+  }
+}
+
+function startKeyFrameLoop(trackId: string, requestFn: () => Promise<boolean>) {
+  stopKeyFrameLoop(trackId);
+
+  let inFlight = false;
+  let consecutiveFailures = 0;
+
+  const tick = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const didRequest = await requestFn();
+      if (!didRequest) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures === 1 || consecutiveFailures % 12 === 0) {
+          workerLogger.warn('keyframe request API not available on transformer', {
+            trackId,
+            consecutiveFailures,
+          });
+        }
+        if (consecutiveFailures >= 12) {
+          stopKeyFrameLoop(trackId);
+        }
+        return;
+      }
+      consecutiveFailures = 0;
+    } catch (error) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures === 1 || consecutiveFailures % 12 === 0) {
+        workerLogger.warn('failed to request/generate video keyframe', {
+          trackId,
+          consecutiveFailures,
+          error,
+        });
+      }
+      if (consecutiveFailures >= 12) {
+        stopKeyFrameLoop(trackId);
+      }
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  void tick();
+  const intervalId = setInterval(() => {
+    void tick();
+  }, FORCE_KEYFRAME_INTERVAL_MS) as unknown as number;
+  keyFrameIntervals.set(trackId, intervalId);
+}
 
 onmessage = (ev) => {
   messageQueue.run(async () => {
@@ -152,6 +237,7 @@ onmessage = (ev) => {
         }
         break;
       case 'removeTransform':
+        stopKeyFrameLoop(data.trackId);
         unsetCryptorParticipant(data.trackId, data.participantIdentity);
         break;
       case 'updateCodec':
@@ -332,10 +418,18 @@ if (self.RTCTransformEvent) {
     const transformer = event.transformer;
     workerLogger.debug('transformer', transformer);
 
-    const { kind, participantIdentity, trackId, codec } =
+    const { kind, participantIdentity, trackId, trackKind, codec } =
       transformer.options as ScriptTransformOptions;
     const cryptor = getTrackCryptor(participantIdentity, trackId);
     workerLogger.debug('transform', { codec });
     cryptor.setupTransform(kind, transformer.readable, transformer.writable, trackId, false, codec);
+
+    if (trackKind === 'video') {
+      if (kind === 'encode') {
+        startKeyFrameLoop(trackId, () => generateVideoKeyFrame(transformer, trackId));
+      } else if (kind === 'decode') {
+        startKeyFrameLoop(trackId, () => sendVideoKeyFrameRequest(transformer, trackId));
+      }
+    }
   };
 }
