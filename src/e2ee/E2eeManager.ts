@@ -76,6 +76,8 @@ export class E2EEManager
 
   private dataChannelEncryptionEnabled: boolean;
 
+  private localTrackIdsBySid: Map<string, string> = new Map();
+
   constructor(options: E2EEManagerOptions, dcEncryptionEnabled: boolean) {
     super();
     this.keyProvider = options.keyProvider;
@@ -288,6 +290,11 @@ export class E2EEManager
     });
 
     room.localParticipant.on(ParticipantEvent.LocalTrackPublished, (publication) => {
+      const trackId = publication.track?.mediaStreamID;
+      if (trackId) {
+        this.localTrackIdsBySid.set(publication.trackSid, trackId);
+      }
+
       // Safari doesn't support retrieving payload information on RTCEncodedVideoFrame, so we need to update the codec manually once we have the trackInfo from the server
       if (!isVideoTrack(publication.track) || !isSafariBased()) {
         return;
@@ -302,6 +309,25 @@ export class E2EEManager
       };
 
       this.worker.postMessage(msg);
+    });
+
+    room.localParticipant.on(ParticipantEvent.LocalTrackUnpublished, (publication) => {
+      const trackId =
+        publication.track?.mediaStreamID ?? this.localTrackIdsBySid.get(publication.trackSid);
+      this.localTrackIdsBySid.delete(publication.trackSid);
+
+      if (!trackId) {
+        return;
+      }
+
+      const msg: RemoveTransformMessage = {
+        kind: 'removeTransform',
+        data: {
+          participantIdentity: room.localParticipant.identity,
+          trackId,
+        },
+      };
+      this.worker?.postMessage(msg);
     });
 
     keyProvider
@@ -448,6 +474,7 @@ export class E2EEManager
       track.receiver,
       track.mediaStreamID,
       remoteId,
+      track.kind,
       track.kind === 'video' ? mimeTypeToVideoCodecString(trackInfo.mimeType) : undefined,
     );
   }
@@ -461,7 +488,7 @@ export class E2EEManager
       track.kind === 'video'
         ? (this.room?.options?.publishDefaults?.videoCodec as VideoCodec)
         : undefined;
-    this.handleSender(sender, track.mediaStreamID, codec);
+    this.handleSender(sender, track.mediaStreamID, track.kind, codec);
   }
 
   /**
@@ -473,69 +500,79 @@ export class E2EEManager
     receiver: RTCRtpReceiver,
     trackId: string,
     participantIdentity: string,
+    trackKind: 'audio' | 'video' | 'unknown',
     codec?: VideoCodec,
   ) {
     if (!this.worker) {
       return;
     }
 
-    if (
-      isScriptTransformSupported() &&
-      // Chrome occasionally throws an `InvalidState` error when using script transforms directly after introducing this API in 141.
-      // Disabling it for Chrome based browsers until the API has stabilized
-      !isChromiumBased()
-    ) {
+    if (E2EE_FLAG in receiver && codec) {
+      const msg: UpdateCodecMessage = {
+        kind: 'updateCodec',
+        data: {
+          trackId,
+          codec,
+          participantIdentity: participantIdentity,
+        },
+      };
+      this.worker.postMessage(msg);
+      return;
+    }
+
+    if (isScriptTransformSupported()) {
       const options: ScriptTransformOptions = {
         kind: 'decode',
         participantIdentity,
         trackId,
+        trackKind,
         codec,
       };
-      // @ts-ignore
-      receiver.transform = new RTCRtpScriptTransform(this.worker, options);
-    } else {
-      if (E2EE_FLAG in receiver && codec) {
-        // only update codec
-        const msg: UpdateCodecMessage = {
-          kind: 'updateCodec',
-          data: {
-            trackId,
-            codec,
-            participantIdentity: participantIdentity,
-          },
-        };
-        this.worker.postMessage(msg);
+      try {
+        // @ts-ignore
+        receiver.transform = new RTCRtpScriptTransform(this.worker, options);
+        // @ts-ignore
+        receiver[E2EE_FLAG] = true;
         return;
-      }
-      // @ts-ignore
-      let writable: WritableStream = receiver.writableStream;
-      // @ts-ignore
-      let readable: ReadableStream = receiver.readableStream;
-
-      if (!writable || !readable) {
-        // @ts-ignore
-        const receiverStreams = receiver.createEncodedStreams();
-        // @ts-ignore
-        receiver.writableStream = receiverStreams.writable;
-        writable = receiverStreams.writable;
-        // @ts-ignore
-        receiver.readableStream = receiverStreams.readable;
-        readable = receiverStreams.readable;
-      }
-
-      const msg: EncodeMessage = {
-        kind: 'decode',
-        data: {
-          readableStream: readable,
-          writableStream: writable,
-          trackId: trackId,
+      } catch (error) {
+        log.warn('failed to initialize script transform, falling back to encoded streams', {
           codec,
-          participantIdentity: participantIdentity,
-          isReuse: E2EE_FLAG in receiver,
-        },
-      };
-      this.worker.postMessage(msg, [readable, writable]);
+          participantIdentity,
+          trackId,
+          error,
+          browser: isChromiumBased() ? 'chromium' : 'non-chromium',
+        });
+      }
     }
+
+    // @ts-ignore
+    let writable: WritableStream = receiver.writableStream;
+    // @ts-ignore
+    let readable: ReadableStream = receiver.readableStream;
+
+    if (!writable || !readable) {
+      // @ts-ignore
+      const receiverStreams = receiver.createEncodedStreams();
+      // @ts-ignore
+      receiver.writableStream = receiverStreams.writable;
+      writable = receiverStreams.writable;
+      // @ts-ignore
+      receiver.readableStream = receiverStreams.readable;
+      readable = receiverStreams.readable;
+    }
+
+    const msg: EncodeMessage = {
+      kind: 'decode',
+      data: {
+        readableStream: readable,
+        writableStream: writable,
+        trackId: trackId,
+        codec,
+        participantIdentity: participantIdentity,
+        isReuse: E2EE_FLAG in receiver,
+      },
+    };
+    this.worker.postMessage(msg, [readable, writable]);
 
     // @ts-ignore
     receiver[E2EE_FLAG] = true;
@@ -546,7 +583,12 @@ export class E2EEManager
    * a frame encoder.
    *
    */
-  private handleSender(sender: RTCRtpSender, trackId: string, codec?: VideoCodec) {
+  private handleSender(
+    sender: RTCRtpSender,
+    trackId: string,
+    trackKind: 'audio' | 'video' | 'unknown',
+    codec?: VideoCodec,
+  ) {
     if (E2EE_FLAG in sender || !this.worker) {
       return;
     }
@@ -555,38 +597,47 @@ export class E2EEManager
       throw TypeError('local identity needs to be known in order to set up encrypted sender');
     }
 
-    if (
-      isScriptTransformSupported() &&
-      // Chrome occasionally throws an `InvalidState` error when using script transforms directly after introducing this API in 141.
-      // Disabling it for Chrome based browsers until the API has stabilized
-      !isChromiumBased()
-    ) {
+    if (isScriptTransformSupported()) {
       log.info('initialize script transform');
-      const options = {
+      const options: ScriptTransformOptions = {
         kind: 'encode',
         participantIdentity: this.room.localParticipant.identity,
         trackId,
+        trackKind,
         codec,
       };
-      // @ts-ignore
-      sender.transform = new RTCRtpScriptTransform(this.worker, options);
-    } else {
-      log.info('initialize encoded streams');
-      // @ts-ignore
-      const senderStreams = sender.createEncodedStreams();
-      const msg: EncodeMessage = {
-        kind: 'encode',
-        data: {
-          readableStream: senderStreams.readable,
-          writableStream: senderStreams.writable,
+      try {
+        // @ts-ignore
+        sender.transform = new RTCRtpScriptTransform(this.worker, options);
+        // @ts-ignore
+        sender[E2EE_FLAG] = true;
+        return;
+      } catch (error) {
+        log.warn('failed to initialize script transform, falling back to encoded streams', {
           codec,
           trackId,
           participantIdentity: this.room.localParticipant.identity,
-          isReuse: false,
-        },
-      };
-      this.worker.postMessage(msg, [senderStreams.readable, senderStreams.writable]);
+          error,
+          browser: isChromiumBased() ? 'chromium' : 'non-chromium',
+        });
+      }
     }
+
+    log.info('initialize encoded streams');
+    // @ts-ignore
+    const senderStreams = sender.createEncodedStreams();
+    const msg: EncodeMessage = {
+      kind: 'encode',
+      data: {
+        readableStream: senderStreams.readable,
+        writableStream: senderStreams.writable,
+        codec,
+        trackId,
+        participantIdentity: this.room.localParticipant.identity,
+        isReuse: false,
+      },
+    };
+    this.worker.postMessage(msg, [senderStreams.readable, senderStreams.writable]);
 
     // @ts-ignore
     sender[E2EE_FLAG] = true;
